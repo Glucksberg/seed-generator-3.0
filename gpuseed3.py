@@ -7,6 +7,7 @@ from colorama import Fore, Style, init
 import sys
 import argparse
 import atexit
+import queue as queue_module  # stdlib queue for exception compatibility
 
 # Initialize colorama
 init(autoreset=True)
@@ -39,12 +40,20 @@ def generate_entropy_gpu(batch_size=4096):
         torch.cuda.empty_cache()  # Clear unused memory
         return result
     else:
-        return torch.randint(0, 256, (batch_size, 16)).numpy()
+        # Use uint8 on CPU as well, to produce 16 bytes of entropy per item
+        # This matches BIP39 expected entropy sizes (e.g., 16 bytes -> 12 words)
+        return torch.randint(0, 256, (batch_size, 16), dtype=torch.uint8).numpy()
 
 def worker(queue, stop_event, batch_size):
     """
     Worker process to generate mnemonics and add them to the queue.
     """
+    # Info: indicate worker startup for diagnostics
+    try:
+        import os
+        print(f"Worker started (PID: {os.getpid()})")  # Startup message
+    except Exception:
+        pass
     mnemo = Mnemonic("english")
     current_batch_size = batch_size
     consecutive_full_count = 0
@@ -52,8 +61,13 @@ def worker(queue, stop_event, batch_size):
     while not stop_event.is_set():
         try:
             # Dynamic batch size adjustment
-            queue_size = queue.qsize()
-            queue_ratio = queue_size / QUEUE_MAX_SIZE
+            # Windows: queue.qsize() may not be implemented; fall back safely
+            try:
+                queue_size = queue.qsize()
+                queue_ratio = queue_size / QUEUE_MAX_SIZE
+            except (NotImplementedError, AttributeError, OSError):
+                # Assume queue is not near full if qsize is unavailable
+                queue_ratio = 0.0  # Safe default to keep producing
             
             if queue_ratio > QUEUE_WARNING_THRESHOLD:
                 consecutive_full_count += 1
@@ -71,9 +85,10 @@ def worker(queue, stop_event, batch_size):
                 try:
                     mnemonic = mnemo.to_mnemonic(entropy.tobytes())
                     total_chars = len(''.join(mnemonic.split()))
-                    if not queue.full():  # Check before attempting to put
+                    # Robust non-blocking enqueue; avoids unreliable full() on Windows
+                    try:
                         queue.put_nowait((mnemonic, total_chars))
-                    else:
+                    except queue_module.Full:
                         time.sleep(WORKER_DELAY)
                         break
                 except Exception:
@@ -95,12 +110,16 @@ def keyboard_listener(stop_event):
                 if msvcrt.kbhit():
                     key = msvcrt.getch()
                     if key.lower() == b'q':
+                        # Debug: indicate stop was requested
+                        print("\nStop signal received (q). Shutting down...")  # Added feedback on stop
                         stop_event.set()
             else:
                 import select
                 if select.select([sys.stdin], [], [], 0)[0]:
                     line = sys.stdin.readline()
                     if 'q' in line.lower():
+                        # Debug: indicate stop was requested
+                        print("\nStop signal received (q). Shutting down...")  # Added feedback on stop
                         stop_event.set()
         except Exception:
             pass
@@ -114,11 +133,15 @@ def collector(queue, stop_event, character_threshold, mnemonics_per_count, log_f
     results_dict = {}
     last_status_time = time.time()
     status_interval = 5  # Status update every 5 seconds
+    empty_queue_count = 0  # Track consecutive empty polls
     
     print("Collector started.")
     print(f"CUDA available: {torch.cuda.is_available()}")
     if torch.cuda.is_available():
         print(f"Using GPU: {torch.cuda.get_device_name(0)}")
+    else:
+        # Inform runtime device when CUDA is not available
+        print("Using CPU for entropy generation")  # Added clarity on execution device
     print(f"Logging results to: {log_file_name}")
     print(f"Looking for mnemonics with {character_threshold} characters or less")
     print("Press 'q' and Enter to stop...")
@@ -149,7 +172,11 @@ def collector(queue, stop_event, character_threshold, mnemonics_per_count, log_f
                         print_output(mnemonic, total_chars, total_iterations, hms_time)
                         log_result(mnemonic, total_chars, total_iterations, hms_time, log_file_name)
 
-        except multiprocessing.queues.Empty:
+        except (multiprocessing.queues.Empty, queue_module.Empty):
+            # If queue stays empty for a while, provide a hint it is still running
+            empty_queue_count += 1
+            if empty_queue_count % int(5 / 0.1) == 0:  # about every 5 seconds
+                print("\nWaiting for data from workers...", end="")
             continue
 
     print("\nCollector terminating.")
@@ -191,6 +218,8 @@ def cleanup(stop_event, workers, listener_process):
     print("All processes terminated.")
 
 if __name__ == '__main__':
+    # Windows safety: ensure child processes can start correctly when using spawn
+    multiprocessing.freeze_support()  # Added for Windows stability
     # Parse command-line arguments
     parser = argparse.ArgumentParser(description='Mnemonic Generator Script')
     parser.add_argument('--threshold', type=int, default=45, help='Character count threshold')
@@ -217,10 +246,17 @@ if __name__ == '__main__':
     # Start worker processes
     num_processes = multiprocessing.cpu_count()
     workers = []
-    for _ in range(num_processes):
-        p = multiprocessing.Process(target=worker, args=(queue, stop_event, batch_size))
-        workers.append(p)
-        p.start()
+    print(f"Starting {num_processes} worker processes...")
+    for i in range(num_processes):
+        try:
+            p = multiprocessing.Process(target=worker, args=(queue, stop_event, batch_size))
+            workers.append(p)
+            p.start()
+            print(f"Worker {i+1} launch requested")
+        except Exception as e:
+            print(f"Failed to start worker {i+1}: {e}")
+    # Give workers a brief moment to initialize (helpful on Windows spawn)
+    time.sleep(0.5)
 
     # Register cleanup function
     atexit.register(cleanup, stop_event, workers, listener_process)
