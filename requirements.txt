@@ -1,0 +1,4 @@
+torch>=2.0.0
+mnemonic>=0.20
+colorama>=0.4.6
+
