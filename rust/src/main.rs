@@ -215,7 +215,7 @@ fn prompt_gpu_setup() -> bool {
     }
 }
 
-fn prompt_gpu_usage(config: &Config) -> bool {
+fn prompt_gpu_usage(_config: &Config) -> bool {
     println!("\nDo you want to use GPU for this session?");
     println!("1. Yes, use GPU");
     println!("2. No, use CPU only");

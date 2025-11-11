@@ -19,7 +19,7 @@ impl ResourceMonitor {
         throttle_data: Arc<Mutex<HashMap<String, f64>>>,
     ) -> Self {
         let mut system = System::new();
-        system.refresh_cpu();
+        system.refresh_cpu_all();
         
         Self {
             stop_flag,
@@ -30,7 +30,7 @@ impl ResourceMonitor {
     
     pub fn run(mut self) {
         while !self.stop_flag.load(Ordering::Relaxed) {
-            self.system.refresh_cpu();
+            self.system.refresh_cpu_all();
             
             // Calculate CPU usage
             let cpu_count = self.system.cpus().len();
