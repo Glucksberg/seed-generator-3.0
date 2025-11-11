@@ -1,0 +1,27 @@
+[package]
+name = "gpuseed-rust"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# BIP39 mnemonic generation
+bip39 = "2.0"
+# Random number generation
+rand = "0.8"
+# System monitoring
+sysinfo = "0.31"
+# Command line arguments
+clap = { version = "4.4", features = ["derive"] }
+# Serialization for config
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+# CPU count
+num_cpus = "1.16"
+# Ctrl+C handler
+ctrlc = "3.4"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+
