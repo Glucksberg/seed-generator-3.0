@@ -2,7 +2,7 @@ use clap::Parser;
 use std::collections::HashMap;
 use std::fs;
 use std::io::{self, Write};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -131,6 +131,10 @@ fn main() {
     let start_time = Instant::now();
     
     println!("Press Ctrl+C to stop...\n");
+    println!("Resource limit: 80% (safety system active)");
+    
+    // Get iterations counter for status display
+    let iterations_counter = worker_pool.get_iterations_counter();
     
     // Handle Ctrl+C
     let stop_flag_ctrlc = stop_flag.clone();
@@ -140,11 +144,54 @@ fn main() {
     })
     .expect("Error setting Ctrl-C handler");
     
-    let results = worker_pool.run();
+    // Run worker pool in a separate thread
+    let worker_results = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let worker_results_clone = worker_results.clone();
+    let worker_pool_for_thread = worker_pool;
+    
+    let worker_handle = std::thread::spawn(move || {
+        let results = worker_pool_for_thread.run();
+        *worker_results_clone.lock().unwrap() = results;
+    });
+    
+    // Status display loop
+    let status_interval = std::time::Duration::from_secs(5);
+    let mut last_status_time = Instant::now();
+    
+    // Show initial status immediately
+    display_status(&iterations_counter, &start_time, &throttle_data);
+    
+    while !stop_flag.load(Ordering::Relaxed) {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        
+        // Check if worker thread finished
+        if worker_handle.is_finished() {
+            break;
+        }
+        
+        // Display status every 5 seconds
+        let now = Instant::now();
+        if now.duration_since(last_status_time) >= status_interval {
+            display_status(&iterations_counter, &start_time, &throttle_data);
+            last_status_time = now;
+        }
+    }
+    
+    // Wait for worker thread to finish
+    worker_handle.join().ok();
+    
+    // Get results
+    let results = Arc::try_unwrap(worker_results)
+        .ok()
+        .and_then(|m| m.into_inner().ok())
+        .unwrap_or_default();
     
     // Stop monitor
     stop_flag.store(true, Ordering::Relaxed);
     monitor_handle.join().ok();
+    
+    // Clear status line
+    println!();
     
     // Save results
     save_results(&results, &args.logfile, &args.output, start_time);
@@ -152,6 +199,59 @@ fn main() {
     println!("\nGeneration complete!");
     println!("Total mnemonics found: {}", results.len());
     println!("Time elapsed: {:?}", start_time.elapsed());
+}
+
+fn display_status(
+    iterations_counter: &Arc<AtomicU64>,
+    start_time: &Instant,
+    throttle_data: &Arc<std::sync::Mutex<HashMap<String, f64>>>,
+) {
+    let iterations = iterations_counter.load(Ordering::Relaxed);
+    let elapsed = start_time.elapsed();
+    // Calculate speed in iterations per second (same as Python)
+    let speed = if elapsed.as_secs_f64() > 0.0 {
+        iterations as f64 / elapsed.as_secs_f64()
+    } else {
+        0.0
+    };
+    
+    // Get resource usage from throttle data
+    let (cpu_usage, gpu_usage, cpu_throttle, gpu_throttle) = {
+        let data = throttle_data.lock().unwrap();
+        let cpu_usage = data.get("cpu_usage").copied().unwrap_or(0.0) * 100.0;
+        let gpu_usage = data.get("gpu_usage").copied().unwrap_or(0.0) * 100.0;
+        let cpu_throttle = data.get("cpu_throttle").copied().unwrap_or(1.0);
+        let gpu_throttle = data.get("gpu_throttle").copied().unwrap_or(1.0);
+        (cpu_usage, gpu_usage, cpu_throttle, gpu_throttle)
+    };
+    
+    // Build throttle status string
+    let throttle_status = if cpu_throttle < 1.0 || gpu_throttle < 1.0 {
+        format!(" [THROTTLE: CPU={:.2}, GPU={:.2}]", cpu_throttle, gpu_throttle)
+    } else {
+        String::new()
+    };
+    
+    // Format iterations with commas
+    let iterations_str = format_number(iterations);
+    
+    // Print status line (overwrite previous line) - same format as Python
+    print!("\rProcessed: {} ({:.0}/s) | CPU: {:.1}% | GPU: {:.1}%{}", 
+        iterations_str, speed, cpu_usage, gpu_usage, throttle_status);
+    io::stdout().flush().ok();
+}
+
+fn format_number(n: u64) -> String {
+    let s = n.to_string();
+    let mut result = String::new();
+    let chars: Vec<char> = s.chars().collect();
+    for (i, &ch) in chars.iter().enumerate() {
+        if i > 0 && (chars.len() - i) % 3 == 0 {
+            result.push(',');
+        }
+        result.push(ch);
+    }
+    result
 }
 
 fn prompt_gpu_setup() -> bool {

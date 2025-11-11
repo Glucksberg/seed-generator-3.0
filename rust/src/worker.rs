@@ -177,4 +177,8 @@ impl WorkerPool {
     pub fn get_iterations(&self) -> u64 {
         self.iterations.load(Ordering::Relaxed)
     }
+    
+    pub fn get_iterations_counter(&self) -> Arc<AtomicU64> {
+        self.iterations.clone()
+    }
 }
