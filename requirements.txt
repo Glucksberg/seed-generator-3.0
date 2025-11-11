@@ -1,4 +1,13 @@
-torch>=2.0.0
 mnemonic>=0.20
 colorama>=0.4.6
+psutil>=5.9.0
+
+# Optional: For advanced NVIDIA GPU monitoring (recommended for NVIDIA GPUs)
+# pynvml>=11.5.0
+
+# NOTE:
+# PyTorch is intentionally NOT pinned here to avoid installing CPU-only by mistake.
+# Install one of the following manually based on your hardware:
+# - NVIDIA GPUs: 'pip install --index-url https://download.pytorch.org/whl/cu121 torch' (or cu118)
+# - AMD/Intel GPUs (Windows): 'pip install torch-directml'
 

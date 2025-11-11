@@ -9,8 +9,37 @@ import argparse
 import atexit
 import queue as queue_module  # stdlib queue for exception compatibility
 
+# Optional monitoring libraries for resource usage control
+try:
+    import psutil
+    PSUTIL_AVAILABLE = True
+except ImportError:
+    PSUTIL_AVAILABLE = False
+
+# Optional NVIDIA GPU monitoring
+try:
+    import pynvml
+    if torch.cuda.is_available():
+        pynvml.nvmlInit()
+        NVML_AVAILABLE = True
+    else:
+        NVML_AVAILABLE = False
+except Exception:
+    NVML_AVAILABLE = False
+
+# Optional DirectML (AMD/Intel on Windows) support
+# If available, we'll use it when CUDA is not available
+try:
+    import torch_directml  # type: ignore
+    DML_AVAILABLE = True
+    DML_DEVICE = torch_directml.device()
+except Exception:
+    DML_AVAILABLE = False
+    DML_DEVICE = None
+
 # Initialize colorama
-init(autoreset=True)
+# Force ANSI conversion on Windows and keep color codes (no strip) to ensure colored output
+init(autoreset=True, convert=True, strip=False)
 
 # Constants
 NUM_STREAMS = 4  # Number of CUDA streams for parallel processing
@@ -19,18 +48,74 @@ WORKER_DELAY = 0.01  # Base delay in workers
 QUEUE_WARNING_THRESHOLD = 0.9  # Slow down workers if queue is 90% full
 BATCH_SIZE_MIN = 512  # Minimum batch size
 
-def generate_entropy_gpu(batch_size=4096):
+# Resource usage limits (safety system)
+MAX_USAGE_PERCENT = 0.80  # Maximum allowed usage: 80%
+MONITOR_INTERVAL = 0.5  # Check resource usage every 0.5 seconds
+THROTTLE_DELAY_BASE = 0.05  # Base delay when throttling is active
+
+def get_cpu_usage():
     """
-    Generate random entropy using GPU (if available) or CPU.
+    Get current CPU usage percentage.
+    Returns 0.0 if psutil is not available.
+    """
+    if not PSUTIL_AVAILABLE:
+        return 0.0
+    try:
+        return psutil.cpu_percent(interval=0.1) / 100.0
+    except Exception:
+        return 0.0
+
+def get_gpu_usage():
+    """
+    Get current GPU usage percentage.
+    Returns 0.0 if monitoring is not available.
     """
     if torch.cuda.is_available():
+        # Try NVML first (most accurate)
+        try:
+            import pynvml
+            handle = pynvml.nvmlDeviceGetHandleByIndex(0)
+            utilization = pynvml.nvmlDeviceGetUtilizationRates(handle)
+            return utilization.gpu / 100.0
+        except Exception:
+            # Fallback: try to estimate from CUDA memory usage
+            try:
+                # Simple heuristic: if memory is being used, assume some GPU activity
+                # This is not perfect but better than nothing
+                memory_used = torch.cuda.memory_allocated() / torch.cuda.max_memory_allocated() if torch.cuda.max_memory_allocated() > 0 else 0.0
+                return min(memory_used * 1.2, 1.0)  # Rough estimate
+            except Exception:
+                return 0.0
+    elif DML_AVAILABLE:
+        # DirectML doesn't have direct monitoring, use time-based throttling
+        return 0.0
+    else:
+        return 0.0
+
+def generate_entropy_gpu(batch_size=4096, throttle_factor=1.0):
+    """
+    Generate random entropy using the best available accelerator:
+    - CUDA (NVIDIA) with streams for parallelism
+    - DirectML (AMD/Intel on Windows) if installed
+    - CPU as a fallback
+    
+    Args:
+        batch_size: Size of batch to generate
+        throttle_factor: Multiplier to reduce batch size when throttling (0.0 to 1.0)
+    """
+    # Apply throttling by reducing batch size
+    adjusted_batch_size = max(BATCH_SIZE_MIN, int(batch_size * throttle_factor))
+    
+    if torch.cuda.is_available():
         device = torch.device('cuda')
-        streams = [torch.cuda.Stream() for _ in range(NUM_STREAMS)]
+        # Reduce number of streams if throttling
+        num_streams = max(1, int(NUM_STREAMS * throttle_factor))
+        streams = [torch.cuda.Stream() for _ in range(num_streams)]
         entropies = []
         
         for stream in streams:
             with torch.cuda.stream(stream):
-                entropy = torch.randint(0, 256, (batch_size, 16), device=device, dtype=torch.uint8)
+                entropy = torch.randint(0, 256, (adjusted_batch_size, 16), device=device, dtype=torch.uint8)
                 entropies.append(entropy)
         
         torch.cuda.synchronize()
@@ -39,14 +124,66 @@ def generate_entropy_gpu(batch_size=4096):
         del combined_entropy, entropies  # Free GPU memory
         torch.cuda.empty_cache()  # Clear unused memory
         return result
+    elif DML_AVAILABLE:
+        # DirectML path: generate directly on DML device and move to CPU
+        # No streams available on DML; a single batch is efficient
+        entropy = torch.randint(0, 256, (adjusted_batch_size, 16), device=DML_DEVICE, dtype=torch.uint8)
+        result = entropy.cpu().numpy()
+        del entropy
+        return result
     else:
         # Use uint8 on CPU as well, to produce 16 bytes of entropy per item
         # This matches BIP39 expected entropy sizes (e.g., 16 bytes -> 12 words)
-        return torch.randint(0, 256, (batch_size, 16), dtype=torch.uint8).numpy()
+        return torch.randint(0, 256, (adjusted_batch_size, 16), dtype=torch.uint8).numpy()
 
-def worker(queue, stop_event, batch_size):
+def resource_monitor(stop_event, throttle_data):
+    """
+    Monitor CPU and GPU usage and update throttle factors.
+    Runs in a separate process to continuously monitor resources.
+    """
+    # Initialize NVML in this process if available (needed for multiprocessing)
+    if torch.cuda.is_available():
+        try:
+            import pynvml
+            pynvml.nvmlInit()
+        except Exception:
+            pass  # Will use fallback method
+    
+    while not stop_event.is_set():
+        try:
+            cpu_usage = get_cpu_usage()
+            gpu_usage = get_gpu_usage()
+            
+            # Calculate throttle factors (1.0 = no throttling, 0.0 = maximum throttling)
+            cpu_throttle = 1.0
+            gpu_throttle = 1.0
+            
+            if cpu_usage > MAX_USAGE_PERCENT:
+                # Reduce throttle factor proportionally when over limit
+                # Example: if at 90% and limit is 80%, reduce to ~0.89
+                cpu_throttle = MAX_USAGE_PERCENT / max(cpu_usage, MAX_USAGE_PERCENT + 0.01)
+            
+            if gpu_usage > MAX_USAGE_PERCENT:
+                # Same logic for GPU
+                gpu_throttle = MAX_USAGE_PERCENT / max(gpu_usage, MAX_USAGE_PERCENT + 0.01)
+            
+            # Update shared throttle data
+            throttle_data['cpu_throttle'] = cpu_throttle
+            throttle_data['gpu_throttle'] = gpu_throttle
+            throttle_data['cpu_usage'] = cpu_usage
+            throttle_data['gpu_usage'] = gpu_usage
+            
+        except Exception as e:
+            # On error, disable throttling to avoid stopping work
+            throttle_data['cpu_throttle'] = 1.0
+            throttle_data['gpu_throttle'] = 1.0
+        
+        time.sleep(MONITOR_INTERVAL)
+
+def worker(queue, stop_event, batch_size, throttle_data):
     """
     Worker process to generate mnemonics and add them to the queue.
+    Now includes resource-aware throttling.
     """
     # Info: indicate worker startup for diagnostics
     try:
@@ -57,10 +194,25 @@ def worker(queue, stop_event, batch_size):
     mnemo = Mnemonic("english")
     current_batch_size = batch_size
     consecutive_full_count = 0
+    last_throttle_check = time.time()
     
     while not stop_event.is_set():
         try:
-            # Dynamic batch size adjustment
+            # Check throttle factors periodically
+            current_time = time.time()
+            if current_time - last_throttle_check >= MONITOR_INTERVAL:
+                cpu_throttle = throttle_data.get('cpu_throttle', 1.0)
+                gpu_throttle = throttle_data.get('gpu_throttle', 1.0)
+                # Use the more restrictive throttle factor
+                throttle_factor = min(cpu_throttle, gpu_throttle)
+                last_throttle_check = current_time
+            else:
+                throttle_factor = min(
+                    throttle_data.get('cpu_throttle', 1.0),
+                    throttle_data.get('gpu_throttle', 1.0)
+                )
+            
+            # Dynamic batch size adjustment based on queue
             # Windows: queue.qsize() may not be implemented; fall back safely
             try:
                 queue_size = queue.qsize()
@@ -77,7 +229,12 @@ def worker(queue, stop_event, batch_size):
                 consecutive_full_count = 0
                 current_batch_size = min(batch_size, current_batch_size * 2)
 
-            entropies = generate_entropy_gpu(current_batch_size)
+            # Apply resource throttling
+            if throttle_factor < 1.0:
+                # Add delay when throttling is active
+                time.sleep(THROTTLE_DELAY_BASE * (1.0 - throttle_factor))
+
+            entropies = generate_entropy_gpu(current_batch_size, throttle_factor)
             
             for entropy in entropies:
                 if stop_event.is_set():
@@ -125,9 +282,10 @@ def keyboard_listener(stop_event):
             pass
         time.sleep(1)
 
-def collector(queue, stop_event, character_threshold, mnemonics_per_count, log_file_name, start_time):
+def collector(queue, stop_event, character_threshold, mnemonics_per_count, log_file_name, start_time, throttle_data):
     """
     Collect and log mnemonics that meet the character threshold.
+    Now includes resource usage display.
     """
     total_iterations = 0
     results_dict = {}
@@ -141,7 +299,25 @@ def collector(queue, stop_event, character_threshold, mnemonics_per_count, log_f
         print(f"Using GPU: {torch.cuda.get_device_name(0)}")
     else:
         # Inform runtime device when CUDA is not available
-        print("Using CPU for entropy generation")  # Added clarity on execution device
+        if DML_AVAILABLE:
+            print("Using DirectML device for entropy generation")
+        else:
+            print("Using CPU for entropy generation")  # Added clarity on execution device
+    
+    # Display resource monitoring status
+    if PSUTIL_AVAILABLE:
+        print("CPU monitoring: Enabled")
+    else:
+        print("CPU monitoring: Limited (psutil not available)")
+    
+    if NVML_AVAILABLE:
+        print("GPU monitoring: Enabled (NVML)")
+    elif torch.cuda.is_available():
+        print("GPU monitoring: Basic (CUDA memory-based)")
+    else:
+        print("GPU monitoring: Not available")
+    
+    print(f"Resource limit: {MAX_USAGE_PERCENT*100:.0f}% (safety system active)")
     print(f"Logging results to: {log_file_name}")
     print(f"Looking for mnemonics with {character_threshold} characters or less")
     print("Press 'q' and Enter to stop...")
@@ -156,7 +332,17 @@ def collector(queue, stop_event, character_threshold, mnemonics_per_count, log_f
             if current_time - last_status_time >= status_interval:
                 elapsed = current_time - start_time
                 speed = total_iterations / elapsed
-                print(f"\rProcessed: {total_iterations:,} ({speed:.0f}/s)", end="")
+                cpu_usage = throttle_data.get('cpu_usage', 0.0) * 100
+                gpu_usage = throttle_data.get('gpu_usage', 0.0) * 100
+                cpu_throttle = throttle_data.get('cpu_throttle', 1.0)
+                gpu_throttle = throttle_data.get('gpu_throttle', 1.0)
+                
+                # Show throttling status
+                throttle_status = ""
+                if cpu_throttle < 1.0 or gpu_throttle < 1.0:
+                    throttle_status = f" [THROTTLE: CPU={cpu_throttle:.2f}, GPU={gpu_throttle:.2f}]"
+                
+                print(f"\rProcessed: {total_iterations:,} ({speed:.0f}/s) | CPU: {cpu_usage:.1f}% | GPU: {gpu_usage:.1f}%{throttle_status}", end="")
                 last_status_time = current_time
 
             if total_chars <= character_threshold:
@@ -205,7 +391,7 @@ def log_result(mnemonic, total_chars, total_iterations, hms_time, log_file_name)
     with open(log_file_name, "a") as f:
         f.write(log_entry)
 
-def cleanup(stop_event, workers, listener_process):
+def cleanup(stop_event, workers, listener_process, monitor_process=None):
     """
     Cleanup function to terminate all processes gracefully.
     """
@@ -215,6 +401,9 @@ def cleanup(stop_event, workers, listener_process):
         p.join()
     listener_process.terminate()
     listener_process.join()
+    if monitor_process is not None:
+        monitor_process.terminate()
+        monitor_process.join()
     print("All processes terminated.")
 
 if __name__ == '__main__':
@@ -222,7 +411,7 @@ if __name__ == '__main__':
     multiprocessing.freeze_support()  # Added for Windows stability
     # Parse command-line arguments
     parser = argparse.ArgumentParser(description='Mnemonic Generator Script')
-    parser.add_argument('--threshold', type=int, default=45, help='Character count threshold')
+    parser.add_argument('--threshold', type=int, default=46, help='Character count threshold')
     parser.add_argument('--count', type=int, default=5, help='Number of mnemonics per character count')
     parser.add_argument('--logfile', type=str, default='mnemonics_log.txt', help='Log file name')
     parser.add_argument('--batch-size', type=int, default=2048, help='Batch size for GPU processing')
@@ -237,6 +426,21 @@ if __name__ == '__main__':
     start_time = time.time()
     stop_event = multiprocessing.Event()
     queue = multiprocessing.Queue(maxsize=QUEUE_MAX_SIZE)
+    
+    # Create shared dictionary for throttle data
+    manager = multiprocessing.Manager()
+    throttle_data = manager.dict({
+        'cpu_throttle': 1.0,
+        'gpu_throttle': 1.0,
+        'cpu_usage': 0.0,
+        'gpu_usage': 0.0
+    })
+
+    # Start resource monitor process
+    monitor_process = multiprocessing.Process(target=resource_monitor, args=(stop_event, throttle_data))
+    monitor_process.daemon = True
+    monitor_process.start()
+    print("Resource monitor started (safety system: 80% limit)")
 
     # Start keyboard listener process
     listener_process = multiprocessing.Process(target=keyboard_listener, args=(stop_event,))
@@ -249,7 +453,7 @@ if __name__ == '__main__':
     print(f"Starting {num_processes} worker processes...")
     for i in range(num_processes):
         try:
-            p = multiprocessing.Process(target=worker, args=(queue, stop_event, batch_size))
+            p = multiprocessing.Process(target=worker, args=(queue, stop_event, batch_size, throttle_data))
             workers.append(p)
             p.start()
             print(f"Worker {i+1} launch requested")
@@ -259,7 +463,7 @@ if __name__ == '__main__':
     time.sleep(0.5)
 
     # Register cleanup function
-    atexit.register(cleanup, stop_event, workers, listener_process)
+    atexit.register(cleanup, stop_event, workers, listener_process, monitor_process)
 
     # Start collector process
-    collector(queue, stop_event, character_threshold, mnemonics_per_count, log_file_name, start_time)
+    collector(queue, stop_event, character_threshold, mnemonics_per_count, log_file_name, start_time, throttle_data)
