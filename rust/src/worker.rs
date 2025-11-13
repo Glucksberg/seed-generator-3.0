@@ -6,6 +6,8 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
+use crate::gpu::GpuContext;
+
 pub struct WorkerPool {
     num_workers: usize,
     batch_size: usize,
@@ -15,6 +17,7 @@ pub struct WorkerPool {
     stop_flag: Arc<AtomicBool>,
     throttle_data: Arc<Mutex<HashMap<String, f64>>>,
     iterations: Arc<AtomicU64>,
+    gpu_context: Option<Arc<GpuContext>>,
 }
 
 impl WorkerPool {
@@ -27,6 +30,20 @@ impl WorkerPool {
         stop_flag: Arc<AtomicBool>,
         throttle_data: Arc<Mutex<HashMap<String, f64>>>,
     ) -> Self {
+        // Initialize GPU context if GPU mode is enabled
+        // Note: Each worker thread will need to create its own GPU context
+        // because CUDA contexts are not thread-safe
+        let gpu_context = if use_gpu {
+            let ctx = GpuContext::new();
+            if ctx.is_available() {
+                Some(Arc::new(ctx))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        
         Self {
             num_workers,
             batch_size,
@@ -36,6 +53,7 @@ impl WorkerPool {
             stop_flag,
             throttle_data,
             iterations: Arc::new(AtomicU64::new(0)),
+            gpu_context,
         }
     }
     
@@ -54,6 +72,7 @@ impl WorkerPool {
                 let threshold = self.threshold;
                 let count_per_threshold = self.count_per_threshold;
                 let use_gpu = self.use_gpu;
+                let gpu_context = self.gpu_context.clone();
                 
                 thread::spawn(move || {
                     Self::worker_loop(
@@ -66,6 +85,7 @@ impl WorkerPool {
                         threshold,
                         count_per_threshold,
                         use_gpu,
+                        gpu_context,
                     );
                 })
             })
@@ -92,7 +112,8 @@ impl WorkerPool {
         batch_size: usize,
         threshold: usize,
         count_per_threshold: usize,
-        _use_gpu: bool,
+        use_gpu: bool,
+        gpu_context: Option<Arc<GpuContext>>,
     ) {
         let mut rng = rand::thread_rng();
         
@@ -113,8 +134,57 @@ impl WorkerPool {
             // Adjust batch size based on throttle
             let adjusted_batch_size = std::cmp::max(1, (batch_size as f64 * throttle_factor) as usize);
             
-            // Generate entropy batch
-            for _ in 0..adjusted_batch_size {
+            // Try to use GPU if available, otherwise fallback to CPU
+            let entropy_batch = if use_gpu {
+                if let Some(ref gpu_ctx) = gpu_context {
+                    // Try GPU generation - log attempt (first time only)
+                    static GPU_ATTEMPT_LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+                    if !GPU_ATTEMPT_LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                        eprintln!("[GPU] Attempting to generate entropy on GPU (batch size: {})", adjusted_batch_size);
+                    }
+                    
+                    match gpu_ctx.generate_entropy_batch(adjusted_batch_size) {
+                        Ok(batch) => {
+                            // GPU generation succeeded - log first time only
+                            static GPU_SUCCESS_LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+                            if !GPU_SUCCESS_LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                                eprintln!("[GPU] Successfully generating entropy on GPU (batch size: {})", adjusted_batch_size);
+                            }
+                            Some(batch)
+                        }
+                        Err(e) => {
+                            // GPU generation failed, fallback to CPU
+                            // Only log once to avoid spam
+                            static GPU_ERROR_LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+                            if !GPU_ERROR_LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                                eprintln!("[GPU] ERROR: GPU generation failed: {}. Using CPU fallback.", e);
+                            }
+                            None
+                        }
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            
+            // Generate entropy batch (GPU or CPU)
+            let entropies: Vec<[u8; 16]> = if let Some(gpu_batch) = entropy_batch {
+                gpu_batch
+            } else {
+                // CPU fallback
+                let mut batch = Vec::with_capacity(adjusted_batch_size);
+                for _ in 0..adjusted_batch_size {
+                    let mut entropy = [0u8; 16];
+                    rng.fill_bytes(&mut entropy);
+                    batch.push(entropy);
+                }
+                batch
+            };
+            
+            // Process each entropy in the batch
+            for entropy in entropies {
                 if stop_flag.load(Ordering::Relaxed) {
                     return;
                 }
@@ -122,43 +192,38 @@ impl WorkerPool {
                 // Increment iteration counter
                 iterations.fetch_add(1, Ordering::Relaxed);
                 
-                // Generate 16 bytes of entropy
-                let mut entropy = [0u8; 16];
-                rng.fill_bytes(&mut entropy);
-                
                 // Convert to mnemonic
                 match Mnemonic::from_entropy_in(Language::English, &entropy) {
                     Ok(mnemonic) => {
                         let mnemonic_str = mnemonic.to_string();
                         let total_chars = mnemonic_str.replace(' ', "").len();
-                        
-                        if total_chars <= threshold {
+
+                        // Only collect seeds with less than 46 characters
+                        // <= 42 chars: no limit (collect all unique)
+                        // 43-45 chars: limit of 5 per character count
+                        if total_chars < 46 {
                             // Lock both structures together to avoid race conditions
                             let mut counts = found_counts.lock().unwrap();
                             let count = counts.entry(total_chars).or_insert(0);
-                            
-                            // Double-check after acquiring lock
-                            if *count < count_per_threshold {
+
+                            // Determine if we should add based on character count
+                            let should_add = if total_chars <= 42 {
+                                // No limit for 42 or less
+                                true
+                            } else {
+                                // Limit of 5 for 43-45 characters
+                                *count < 5
+                            };
+
+                            if should_add {
                                 // Check if we already have this mnemonic
                                 let mut results_guard = results.lock().unwrap();
                                 if !results_guard.iter().any(|(m, _)| m == &mnemonic_str) {
                                     results_guard.push((mnemonic_str.clone(), total_chars));
                                     *count += 1;
-                                    
+
                                     println!("\nMnemonic: {}", mnemonic_str);
                                     println!("Total characters: {}", total_chars);
-                                    
-                                    // Check if we've reached the target for this threshold
-                                    if *count >= count_per_threshold {
-                                        // Release locks before checking if we should stop
-                                        drop(results_guard);
-                                        drop(counts);
-                                        
-                                        // Note: We don't stop automatically when finding enough
-                                        // for one threshold, as we want to find mnemonics for
-                                        // multiple different character counts. The user can
-                                        // stop manually with Ctrl+C when satisfied.
-                                    }
                                 }
                             }
                         }
@@ -180,5 +245,12 @@ impl WorkerPool {
     
     pub fn get_iterations_counter(&self) -> Arc<AtomicU64> {
         self.iterations.clone()
+    }
+    
+    pub fn cleanup(&self) {
+        // Cleanup GPU contexts if GPU was used
+        if let Some(ref gpu_ctx) = self.gpu_context {
+            gpu_ctx.cleanup();
+        }
     }
 }

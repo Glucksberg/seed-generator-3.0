@@ -2,6 +2,7 @@
 name = "gpuseed-rust"
 version = "0.1.0"
 edition = "2021"
+build = "build.rs"
 
 [dependencies]
 # BIP39 mnemonic generation
@@ -19,6 +20,17 @@ serde_json = "1.0"
 num_cpus = "1.16"
 # Ctrl+C handler
 ctrlc = "3.4"
+# GPU support with CUDA (optional, requires CUDA Toolkit)
+rustacuda = { version = "0.1", optional = true }
+rustacuda_core = { version = "0.1", optional = true }
+rustacuda_derive = { version = "0.1", optional = true }
+# GPU monitoring (optional, for NVIDIA GPUs)
+nvml-wrapper = { version = "0.3", optional = true }
+
+[features]
+default = []
+gpu = ["rustacuda", "rustacuda_core", "rustacuda_derive", "gpu-monitoring"]
+gpu-monitoring = ["nvml-wrapper"]
 
 [profile.release]
 opt-level = 3

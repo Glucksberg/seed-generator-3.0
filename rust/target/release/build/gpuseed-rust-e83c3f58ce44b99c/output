@@ -1,0 +1,3 @@
+cargo:warning=CUDA Toolkit detected. Kernel compilation will be attempted.
+cargo:warning=CUDA kernel compiled successfully to "C:\\Users\\Markus\\Desktop\\PROJETOS\\APPs mais antigos\\seed generator 3.0\\seed-generator-3.0\\rust\\target\\release\\build\\gpuseed-rust-e83c3f58ce44b99c\\out\\kernel.ptx"
+cargo:warning=PTX module generated at "C:\\Users\\Markus\\Desktop\\PROJETOS\\APPs mais antigos\\seed generator 3.0\\seed-generator-3.0\\rust\\target\\release\\build\\gpuseed-rust-e83c3f58ce44b99c\\out\\kernel_ptx.rs"

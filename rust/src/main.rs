@@ -1,3 +1,7 @@
+#[cfg(feature = "gpu")]
+#[macro_use]
+extern crate rustacuda;
+
 use clap::Parser;
 use std::collections::HashMap;
 use std::fs;
@@ -88,6 +92,8 @@ fn main() {
     
     if !use_gpu {
         println!("\nRunning in CPU-only mode.");
+    } else {
+        println!("\nGPU mode enabled (configuration saved).");
     }
     
     // Initialize output file
@@ -96,8 +102,9 @@ fn main() {
     }
     
     println!("\nStarting mnemonic generation...");
-    println!("Threshold: {} characters", args.threshold);
-    println!("Count per threshold: {}", args.count);
+    println!("Looking for mnemonics with LESS than 46 characters");
+    println!("  - 43-45 chars: limit of 5 per count");
+    println!("  - 42 or less: NO LIMIT (collect all unique)");
     println!("Batch size: {}", args.batch_size);
     println!("Output file: {}", args.output);
     println!("GPU: {}", if use_gpu { "Enabled" } else { "Disabled" });
@@ -177,18 +184,28 @@ fn main() {
         }
     }
     
-    // Wait for worker thread to finish
-    worker_handle.join().ok();
+    // Stop monitor and workers
+    stop_flag.store(true, Ordering::Relaxed);
     
-    // Get results
+    // Get results first (before joining)
     let results = Arc::try_unwrap(worker_results)
         .ok()
         .and_then(|m| m.into_inner().ok())
         .unwrap_or_default();
     
-    // Stop monitor
-    stop_flag.store(true, Ordering::Relaxed);
+    // Give workers a moment to finish (they check stop_flag)
+    let timeout = std::time::Duration::from_secs(2);
+    let start_wait = std::time::Instant::now();
+    while !worker_handle.is_finished() && start_wait.elapsed() < timeout {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    
+    // Join monitor (should finish quickly)
     monitor_handle.join().ok();
+    
+    // Try to join worker (with timeout handling)
+    // If it doesn't finish in time, we'll continue anyway
+    let _ = worker_handle.join();
     
     // Clear status line
     println!();

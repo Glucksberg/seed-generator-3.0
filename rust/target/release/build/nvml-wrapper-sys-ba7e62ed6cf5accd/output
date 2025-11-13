@@ -1,0 +1,2 @@
+cargo:rustc-link-lib=nvml
+cargo:rustc-link-search=C:\Program Files\NVIDIA Corporation\NVSMI

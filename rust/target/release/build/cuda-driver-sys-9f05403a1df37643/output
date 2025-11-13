@@ -1,0 +1,4 @@
+cargo:rustc-link-search=native=C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.0\lib\x64
+cargo:rustc-link-lib=dylib=cuda
+cargo:rerun-if-changed=build.rs
+cargo:rerun-if-env-changed=CUDA_LIBRARY_PATH
