@@ -186,26 +186,25 @@ fn main() {
     
     // Stop monitor and workers
     stop_flag.store(true, Ordering::Relaxed);
-    
-    // Get results first (before joining)
-    let results = Arc::try_unwrap(worker_results)
-        .ok()
-        .and_then(|m| m.into_inner().ok())
-        .unwrap_or_default();
-    
+
     // Give workers a moment to finish (they check stop_flag)
     let timeout = std::time::Duration::from_secs(2);
     let start_wait = std::time::Instant::now();
     while !worker_handle.is_finished() && start_wait.elapsed() < timeout {
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
-    
+
+    // Join worker thread first (wait for it to finish)
+    let _ = worker_handle.join();
+
     // Join monitor (should finish quickly)
     monitor_handle.join().ok();
-    
-    // Try to join worker (with timeout handling)
-    // If it doesn't finish in time, we'll continue anyway
-    let _ = worker_handle.join();
+
+    // Get results - clone from Arc since try_unwrap may fail
+    let results = {
+        let results_guard = worker_results.lock().unwrap();
+        results_guard.clone()
+    };
     
     // Clear status line
     println!();
@@ -357,28 +356,33 @@ fn save_results(
     start_time: Instant,
 ) {
     let elapsed = start_time.elapsed();
-    
+
+    if results.is_empty() {
+        println!("No seeds found matching criteria (< 46 characters).");
+        return;
+    }
+
     // Save to log file
-    if !results.is_empty() {
-        let mut log_content = String::new();
-        for (mnemonic, chars) in results {
-            log_content.push_str(&format!(
-                "Mnemonic: {}\nTotal characters: {}\nTime elapsed: {:?}\n----------------------------------\n",
-                mnemonic, chars, elapsed
-            ));
-        }
-        if let Err(e) = fs::write(logfile, log_content) {
-            eprintln!("Warning: Could not write to log file: {}", e);
-        }
-        
-        // Save to output file (simple format)
-        let mut output_content = String::new();
-        for (mnemonic, chars) in results {
-            output_content.push_str(&format!("{} {}\n", mnemonic, chars));
-        }
-        if let Err(e) = fs::write(output, output_content) {
-            eprintln!("Warning: Could not write to output file: {}", e);
-        }
+    let mut log_content = String::new();
+    for (mnemonic, chars) in results {
+        log_content.push_str(&format!(
+            "Mnemonic: {}\nTotal characters: {}\nTime elapsed: {:?}\n----------------------------------\n",
+            mnemonic, chars, elapsed
+        ));
+    }
+    match fs::write(logfile, &log_content) {
+        Ok(_) => println!("Saved {} seeds to {}", results.len(), logfile),
+        Err(e) => eprintln!("Error: Could not write to log file: {}", e),
+    }
+
+    // Save to output file (simple format)
+    let mut output_content = String::new();
+    for (mnemonic, chars) in results {
+        output_content.push_str(&format!("{} {}\n", mnemonic, chars));
+    }
+    match fs::write(output, &output_content) {
+        Ok(_) => println!("Saved {} seeds to {}", results.len(), output),
+        Err(e) => eprintln!("Error: Could not write to output file: {}", e),
     }
 }
 
