@@ -523,7 +523,9 @@ def collector(queue, stop_event, character_threshold, mnemonics_per_count, log_f
     
     print(f"Resource limit: {MAX_USAGE_PERCENT*100:.0f}% (safety system active)")
     print(f"Logging results to: {log_file_name}")
-    print(f"Looking for mnemonics with {character_threshold} characters or less")
+    print(f"Looking for mnemonics with LESS than 46 characters")
+    print(f"  - 43-45 chars: limit of 5 per count")
+    print(f"  - 42 or less: NO LIMIT (collect all unique)")
     print("Press 'q' and Enter to stop...")
 
     while not stop_event.is_set():
@@ -549,18 +551,29 @@ def collector(queue, stop_event, character_threshold, mnemonics_per_count, log_f
                 print(f"\rProcessed: {total_iterations:,} ({speed:.0f}/s) | CPU: {cpu_usage:.1f}% | GPU: {gpu_usage:.1f}%{throttle_status}", end="")
                 last_status_time = current_time
 
-            if total_chars <= character_threshold:
+            # Only collect seeds with less than 46 characters
+            # <= 42 chars: no limit (collect all unique)
+            # 43-45 chars: limit of 5 per character count
+            if total_chars < 46:
                 if total_chars not in results_dict:
                     results_dict[total_chars] = set()
 
-                if len(results_dict[total_chars]) < mnemonics_per_count:
-                    if mnemonic not in results_dict[total_chars]:
-                        results_dict[total_chars].add(mnemonic)
-                        elapsed_time = time.time() - start_time
-                        hms_time = str(timedelta(seconds=int(elapsed_time)))
-                        print("\n")  # Clear status line
-                        print_output(mnemonic, total_chars, total_iterations, hms_time)
-                        log_result(mnemonic, total_chars, total_iterations, hms_time, log_file_name)
+                # Check if we should add this seed
+                should_add = False
+                if total_chars <= 42:
+                    # No limit for 42 or less
+                    should_add = mnemonic not in results_dict[total_chars]
+                else:
+                    # Limit of 5 for 43-45 characters
+                    should_add = len(results_dict[total_chars]) < 5 and mnemonic not in results_dict[total_chars]
+
+                if should_add:
+                    results_dict[total_chars].add(mnemonic)
+                    elapsed_time = time.time() - start_time
+                    hms_time = str(timedelta(seconds=int(elapsed_time)))
+                    print("\n")  # Clear status line
+                    print_output(mnemonic, total_chars, total_iterations, hms_time)
+                    log_result(mnemonic, total_chars, total_iterations, hms_time, log_file_name)
 
         except (multiprocessing.queues.Empty, queue_module.Empty):
             # If queue stays empty for a while, provide a hint it is still running

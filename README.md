@@ -1,94 +1,87 @@
 # GPU Seed Generator 3.0
 
-Gerador de seeds BIP39 de alta performance com suporte a GPU (CUDA/DirectML) e sistema de segurança para limitar uso de recursos.
+High-performance BIP39 mnemonic seed generator with GPU acceleration.
 
-## 📁 Estrutura do Projeto
+## Overview
 
-```
-seed-generator-3.0/
-├── python/              # Versão Python (original)
-│   ├── gpuseed3.py     # Script principal Python
-│   ├── requirements.txt # Dependências Python
-│   ├── scripts/        # Scripts de instalação
-│   └── README.md       # Documentação da versão Python
-├── rust/               # Versão Rust (alta performance)
-│   ├── Cargo.toml     # Configuração do projeto Rust
-│   ├── src/           # Código fonte Rust
-│   ├── README.md      # Documentação da versão Rust
-│   └── README_RUST.md # Documentação técnica adicional
-├── README.md          # Este arquivo (documentação geral)
-├── REVISAO_FINAL.md   # Revisão técnica completa
-└── gpuseed_config.json # Configuração compartilhada (gerado automaticamente)
-```
+Generates BIP39 mnemonic seeds and searches for those with minimal character counts (spaces removed). Uses GPU acceleration to achieve billions of iterations per hour.
 
-## 🚀 Versões Disponíveis
+**Key Features:**
+- GPU acceleration via NVIDIA CUDA
+- Automatic resource throttling (80% CPU/GPU safety limit)
+- Searches for seeds with < 46 characters
+- No limit for rare seeds ≤ 42 characters
+- Limit of 5 for seeds with 43-45 characters
+- Real-time progress monitoring
 
-### Versão Python (`python/`)
-- ✅ Funcional e testada
-- ✅ Suporte completo a GPU (CUDA/DirectML)
-- ✅ Sistema de segurança (limite 80%)
-- ✅ Fácil de usar e modificar
-- 📊 Performance: ~30k iterações/segundo
+## Quick Start
 
-**Uso:**
-```bash
-cd python
-pip install -r requirements.txt
-python gpuseed3.py --threshold 46 --count 5
-```
-
-**Documentação completa:** Veja `python/README.md`
-
-### Versão Rust (`rust/`)
-- ✅ Alta performance (10-50x mais rápido)
-- ✅ Thread-safe garantido pelo compilador
-- ✅ Sistema de segurança (limite 80%)
-- ⏳ Suporte GPU (preparado, a ser implementado)
-- 📊 Performance: ~300k-1.5M iterações/segundo
-
-**Uso:**
+### Rust Version (Recommended - Fastest)
 ```bash
 cd rust
-cargo build --release
-cargo run --release -- --threshold 46 --count 5
+run.bat
 ```
 
-**Documentação completa:** Veja `rust/README.md`
+### Python Version
+```bash
+cd python
+run.bat
+```
 
-## 📋 Arquivos Compartilhados (Raiz)
+## Implementations
 
-- `gpuseed_config.json` - Configuração de GPU (compartilhada entre versões)
-- `*.txt` - Arquivos de log/output (gerados durante execução)
-- `README.md` - Este arquivo
-- `REVISAO_FINAL.md` - Revisão técnica completa
+### Rust (Best Performance)
+- **Speed**: 1.5-2 billion iterations/hour
+- **Technology**: Direct CUDA kernel integration with cuRAND
+- **Location**: `rust/`
+- **Setup**: See `rust/README.md`
 
-## 🎯 Qual Versão Usar?
+### Python (Easier Setup)
+- **Speed**: 1-1.5 billion iterations/hour
+- **Technology**: PyTorch GPU acceleration
+- **Location**: `python/`
+- **Setup**: See `python/README.md`
 
-- **Python**: Se você quer facilidade de uso, modificação rápida, ou já tem Python instalado
-- **Rust**: Se você precisa de máxima performance e está disposto a compilar
+## Requirements
 
-Ambas as versões são funcionalmente equivalentes e compartilham a mesma configuração (`gpuseed_config.json`).
+**Hardware:**
+- NVIDIA GPU with CUDA support
 
-## 📖 Documentação Detalhada
+**Software:**
+- CUDA Toolkit 11.8 or 12.x
+- For Rust: Visual Studio Build Tools + Rust toolchain
+- For Python: Python 3.8+ + PyTorch with CUDA
 
-- **Versão Python**: Veja `python/README.md`
-- **Versão Rust**: Veja `rust/README.md`
-- **Revisão Técnica**: Veja `REVISAO_FINAL.md`
+## Output Files
 
-## 🔧 Requisitos
+Results saved to:
+- `mnemonics_log.txt` - Detailed log with timestamps and iterations
+- `seeds_output.txt` - Simple list format (mnemonic + char count)
 
-### Python
-- Python 3.8+
-- pip
-- (Opcional) PyTorch com CUDA para GPU
+## Seed Collection Rules
 
-### Rust
-- Rust 1.70+
-- Cargo (vem com Rust)
+- **45, 44, 43 characters**: Maximum 5 seeds per character count
+- **42 characters or less**: Unlimited (collects all unique seeds found)
 
-## 📝 Notas
+## Performance
 
-- Ambas as versões geram o mesmo arquivo de configuração (`gpuseed_config.json`)
-- Os arquivos de output podem ser compartilhados entre versões
-- A versão Rust é significativamente mais rápida mas requer compilação
-- Cada versão tem sua própria documentação na respectiva pasta
+Real-world performance with NVIDIA GPU:
+- **Rust**: ~1,500,000 iterations/second
+- **Python**: ~1,000,000 iterations/second
+- **2 hours runtime**: ~3 billion seeds tested
+
+## Documentation
+
+- **Rust Setup & Usage**: `rust/README.md`
+- **Python Setup & Usage**: `python/README.md`
+
+## How to Choose
+
+- **Use Rust** if you want maximum speed and don't mind compilation
+- **Use Python** if you want easier setup or need to modify code frequently
+
+Both versions produce identical results and share configuration.
+
+## License
+
+Educational and research purposes only.

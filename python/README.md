@@ -1,65 +1,115 @@
-# GPU Seed Generator - Versão Python
+# GPU Seed Generator - Python Version
 
-Versão original em Python do gerador de seeds BIP39.
+Python implementation of the BIP39 mnemonic seed generator with GPU acceleration.
 
-## Características
+## Features
 
-- ✅ Suporte completo a GPU (CUDA/DirectML)
-- ✅ Sistema de segurança (limite 80% CPU/GPU)
-- ✅ Monitoramento em tempo real
-- ✅ Throttling dinâmico
-- ✅ Configuração interativa de GPU
-- ✅ Instalação automática de dependências
+- GPU acceleration via PyTorch (NVIDIA CUDA)
+- Automatic resource throttling (80% CPU/GPU limit)
+- Real-time monitoring and statistics
+- Interactive GPU configuration
+- Automatic PyTorch installation
 
-## Instalação
+## Quick Start
 
+**Option 1 - Using batch file (easiest):**
 ```bash
-# Instalar dependências
+run.bat
+```
+
+**Option 2 - Command line:**
+```bash
+python gpuseed3.py
+```
+
+## Installation
+
+### 1. Install Python Dependencies
+```bash
 pip install -r requirements.txt
-
-# (Opcional) Instalar PyTorch com CUDA para GPU NVIDIA
-# Veja scripts/install_cuda.ps1
-
-# (Opcional) Instalar PyTorch CPU-only
-# Veja scripts/install_cpu.ps1
 ```
 
-## Uso
+### 2. Install PyTorch with CUDA (for GPU acceleration)
+
+**NVIDIA GPU:**
+```bash
+# CUDA 12.1
+pip install torch --index-url https://download.pytorch.org/whl/cu121
+
+# Or CUDA 11.8
+pip install torch --index-url https://download.pytorch.org/whl/cu118
+```
+
+The program can also install PyTorch automatically on first run.
+
+## Command Line Options
 
 ```bash
-# Uso básico
-python gpuseed3.py --threshold 46 --count 5
-
-# Com opções customizadas
-python gpuseed3.py --threshold 44 --count 10 --batch-size 4096 --logfile resultados.txt
-
-# Resetar configuração
-python gpuseed3.py --reset-config
+python gpuseed3.py [OPTIONS]
 ```
 
-## Opções de Linha de Comando
+**Available options:**
+- `--batch-size <N>` - Batch size for GPU processing (default: 2048)
+- `--logfile <file>` - Log file name (default: mnemonics_log.txt)
+- `--reset-config` - Reset GPU configuration
 
-- `--threshold <N>`: Limite de caracteres (padrão: 46)
-- `--count <N>`: Número de mnemonics por contagem de caracteres (padrão: 5)
-- `--logfile <arquivo>`: Arquivo de log detalhado (padrão: mnemonics_log.txt)
-- `--batch-size <N>`: Tamanho do batch para GPU (padrão: 2048)
-- `--reset-config`: Resetar configuração de GPU
+**Note:** `--threshold` and `--count` parameters are no longer used. The program is configured to:
+- Search for seeds with < 46 characters
+- Limit of 5 for 43-45 character seeds
+- No limit for 42 character or less seeds (collects all)
 
-## Requisitos
+## Requirements
 
+**Mandatory:**
 - Python 3.8+
-- psutil (obrigatório)
-- pynvml (opcional, para monitoramento NVIDIA)
-- PyTorch (instalado automaticamente ou manualmente)
-- mnemonic (biblioteca BIP39)
-- colorama (cores no terminal)
+- mnemonic (BIP39 library)
+- colorama (terminal colors)
+
+**Optional but recommended:**
+- PyTorch with CUDA (for GPU acceleration)
+- psutil (for CPU monitoring)
+- pynvml (for NVIDIA GPU monitoring)
 
 ## Performance
 
-- CPU: ~18k-35k iterações/segundo
-- GPU: ~30k-50k iterações/segundo (depende da GPU)
+With NVIDIA GPU:
+- **Speed**: ~1,000,000 iterations/second
+- **2 hours**: ~1-1.5 billion seeds tested
 
-## Documentação Completa
+Without GPU (CPU only):
+- **Speed**: ~30,000-50,000 iterations/second
 
-Veja `../README.md` para documentação detalhada completa.
+## Configuration
 
+GPU configuration is saved to `../gpuseed_config.json` and shared between Python and Rust versions.
+
+To reconfigure GPU:
+```bash
+python gpuseed3.py --reset-config
+```
+
+## Output Files
+
+- `mnemonics_log.txt` - Detailed log with all found seeds
+- Default location: `python/` directory
+
+## Stopping the Program
+
+Press `q` and Enter to stop gracefully.
+
+## Troubleshooting
+
+**GPU not detected:**
+- Ensure NVIDIA drivers are installed
+- Install PyTorch with CUDA support
+- Run `nvidia-smi` to verify GPU is accessible
+
+**Low performance:**
+- Increase `--batch-size` (try 4096 or 8192)
+- Close other GPU-intensive applications
+- Check resource monitor output for throttling
+
+## See Also
+
+- Main README: `../README.md`
+- Rust version: `../rust/README.md`

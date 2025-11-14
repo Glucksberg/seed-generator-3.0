@@ -1,8 +1,15 @@
 # Arquivos de configuração (compartilhados)
 gpuseed_config.json
 
-# Arquivos de output (gerados)
+# Arquivos de output de seeds (IMPORTANTE: nunca commitar seeds!)
+mnemonics_log.txt
+seeds_output.txt
+test_output.txt
+
+# Outros arquivos .txt (gerados)
 *.txt
+
+# Exceções: arquivos de documentação
 !README.md
 !requirements.txt
 
